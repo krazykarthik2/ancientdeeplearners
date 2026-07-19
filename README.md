@@ -28,11 +28,11 @@ The `GEMINITiny` architecture consists of four tightly coupled mathematical modu
 
 ```mermaid
 graph TD
-    DNA[DNA Sequence [32, 5]] --> CAE[Contractive Autoencoder]
-    CAE -->|Embedding [32, 16]| MHN[Modern Hopfield Network]
-    MHN -->|Motif Retrieval [32, 16]| PC[Predictive Coding Backbone]
-    PC -->|Top-Down State mu2 [64, 8]| BM[Boltzmann Fusion Head]
-    BM -->|Symmetric Bilinear Energy| ContactMap[32x32 Binary Contact Map]
+    DNA["DNA Sequence [32, 5]"] --> CAE["Contractive Autoencoder"]
+    CAE -->|"Embedding [32, 16]"| MHN["Modern Hopfield Network"]
+    MHN -->|"Motif Retrieval [32, 16]"| PC["Predictive Coding Backbone"]
+    PC -->|"Top-Down State mu2 [64, 8]"| BM["Boltzmann Fusion Head"]
+    BM -->|Symmetric Bilinear Energy| ContactMap["32x32 Binary Contact Map"]
 ```
 
 ### A. Contractive Autoencoder (CAE)
