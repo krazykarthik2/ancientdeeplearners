@@ -93,46 +93,48 @@ class PredictiveCodingBackbone(nn.Module):
         return x_pred, mu1_pred
 
 class BoltzmannFusionHead(nn.Module):
-    def __init__(self, in_features=16, latent_dim=8):
+    def __init__(self, in_features=64, latent_dim=8):
         super().__init__()
         self.W_proj = nn.Linear(in_features, latent_dim)
         self.J = nn.Parameter(torch.randn(latent_dim, latent_dim))
         
+        # Learnable sequence upsampler to sharply map length 8 -> 32 without linear smoothing/blurring
+        self.upsample_seq = nn.ConvTranspose1d(
+            in_channels=latent_dim, 
+            out_channels=latent_dim, 
+            kernel_size=4, 
+            stride=4, 
+            padding=0
+        )
+        
         # Initial negative bias to cleanly suppress sparse background contacts
         self.bias = nn.Parameter(torch.tensor(-4.5))
-        self.pc = None # Set dynamically in GEMINITiny constructor
         
         # Initialize symmetric coupling matrix J
         with torch.no_grad():
             self.J.copy_(0.5 * (self.J + self.J.T))
 
-    def set_pc(self, pc):
-        self.pc = pc
-
     def forward(self, mu2):
         # mu2 state: [B, 64, 8]
         B = mu2.shape[0]
         
-        # 1. Top-down generative reconstruction of sequence features of length 32
-        # W2 expects [B, 64, 8] -> predicts mu1_pred: [B, 32, 16] (length 16)
-        mu1_pred = F.leaky_relu(self.pc.W2(mu2))
-        # W1 expects [B, 32, 16] -> predicts x_pred: [B, 16, 32] (length 32)
-        x_pred = F.leaky_relu(self.pc.W1(mu1_pred))
-        
-        # 2. Project channels 16 -> 8
+        # 1. Project channels 64 -> 8
         # Permute to apply Linear on channel dimension
-        z = x_pred.transpose(1, 2) # [B, 32, 16]
-        z = self.W_proj(z) # [B, 32, 8]
-        # Apply ReLU to enforce non-negativity and sparsity
-        z = F.relu(z)
+        z = mu2.transpose(1, 2) # [B, 8, 64] (length=8, channels=64)
+        z = self.W_proj(z) # [B, 8, 8] (length=8, channels=8)
+        z = z.transpose(1, 2) # [B, 8, 8] (channels=8, length=8)
+        
+        # 2. Sharply upsample sequence length 8 -> 32 and apply ReLU to enforce sparsity
+        z_upsampled = F.relu(self.upsample_seq(z)) # [B, 8, 32] (channels=8, length=32)
+        z_upsampled = z_upsampled.transpose(1, 2) # [B, 32, 8] (length=32, channels=8)
         
         # 3. Symmetric Coupling Matrix J
         J_sym = 0.5 * (self.J + self.J.T)
         
         # 4. Energy calculation to generate final 32x32 interaction matrix with bias
         # logits_ij = z_i^T J_sym z_j + bias
-        # z: [B, 32, 8]
-        logits = torch.matmul(torch.matmul(z, J_sym), z.transpose(-2, -1)) + self.bias
+        # z_upsampled: [B, L, 8]
+        logits = torch.matmul(torch.matmul(z_upsampled, J_sym), z_upsampled.transpose(-2, -1)) + self.bias
         probs = torch.sigmoid(logits)
         return logits, probs
 
@@ -142,8 +144,7 @@ class GEMINITiny(nn.Module):
         self.cae = ContractiveAutoencoder(in_dim=5, out_dim=16)
         self.mhn = ModernHopfieldNetwork(num_slots=8, d_model=16)
         self.pc = PredictiveCodingBackbone()
-        self.bm = BoltzmannFusionHead(in_features=16, latent_dim=8)
-        self.bm.set_pc(self.pc)
+        self.bm = BoltzmannFusionHead(in_features=64, latent_dim=8)
 
     def forward_inference(self, x, steps=10, eta=0.05):
         # x: [B, 32, 5]

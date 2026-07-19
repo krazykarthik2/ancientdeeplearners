@@ -76,11 +76,8 @@ def main():
             # Detach tensors for plotting (slice out first 4 channels of sequence for A/C/G/T display)
             one_hot_seq = x[0, :, :4].cpu().numpy() # [32, 4]
             true_matrix = target[0].cpu().numpy() # [32, 32]
-            # Threshold at 0.8 to filter out weak false positives and zero out diagonal self-contacts
-            raw_pred = probs[0].detach().cpu().numpy()
-            pred_matrix = (raw_pred > 0.8).astype(float) # [32, 32]
-            import numpy as np
-            np.fill_diagonal(pred_matrix, 0.0)
+            # Threshold to get exactly +1.0 and 0.0 binary matrix
+            pred_matrix = (probs[0].detach().cpu().numpy() > 0.5).astype(float) # [32, 32]
             
         # Panel 1: Sequence One-hot (first 4 channels)
         im1 = axes[row_idx, 0].imshow(one_hot_seq.T, aspect='auto', cmap='Blues', interpolation='nearest')
