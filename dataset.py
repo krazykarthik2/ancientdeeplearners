@@ -138,8 +138,21 @@ class RealGenomicEPDataset(Dataset):
         if sample['is_loop']:
             a = sample['idx_a']
             b = sample['idx_b']
+            # Motif A and B are 4 base pairs long.
+            # Set the 4 physical interaction spots (start and end of both motifs)
             target[a, b] = 1.0
             target[b, a] = 1.0
+            
+            # Prevent out-of-bounds if motif is at the very edge
+            if a + 3 < 32 and b + 3 < 32:
+                target[a, b+3] = 1.0
+                target[b+3, a] = 1.0
+                
+                target[a+3, b] = 1.0
+                target[b, a+3] = 1.0
+                
+                target[a+3, b+3] = 1.0
+                target[b+3, a+3] = 1.0
             
         return {
             'sequence': input_tensor,
