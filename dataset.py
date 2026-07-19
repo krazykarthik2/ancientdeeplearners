@@ -134,28 +134,24 @@ class RealGenomicEPDataset(Dataset):
         pos_coord = torch.arange(L, dtype=torch.float32).view(L, 1) / (L - 1) # [32, 1]
         input_tensor = torch.cat([one_hot, pos_coord], dim=-1) # [32, 5]
         
-        target = torch.zeros(32, 32, dtype=torch.float32)
+        target_starts = torch.zeros(32, 32, dtype=torch.float32)
+        target_ends = torch.zeros(32, 32, dtype=torch.float32)
         if sample['is_loop']:
             a = sample['idx_a']
             b = sample['idx_b']
-            # Motif A and B are 4 base pairs long.
-            # Set the 4 physical interaction spots (start and end of both motifs)
-            target[a, b] = 1.0
-            target[b, a] = 1.0
             
-            # Prevent out-of-bounds if motif is at the very edge
+            # Start-to-Start interactions
+            target_starts[a, b] = 1.0
+            target_starts[b, a] = 1.0
+            
+            # End-to-End interactions
             if a + 3 < 32 and b + 3 < 32:
-                target[a, b+3] = 1.0
-                target[b+3, a] = 1.0
-                
-                target[a+3, b] = 1.0
-                target[b, a+3] = 1.0
-                
-                target[a+3, b+3] = 1.0
-                target[b+3, a+3] = 1.0
+                target_ends[a+3, b+3] = 1.0
+                target_ends[b+3, a+3] = 1.0
             
         return {
             'sequence': input_tensor,
-            'target': target,
+            'target_starts': target_starts,
+            'target_ends': target_ends,
             'is_loop': torch.tensor(1.0 if sample['is_loop'] else 0.0, dtype=torch.float32)
         }

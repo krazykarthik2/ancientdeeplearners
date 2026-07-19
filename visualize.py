@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import numpy as np
 
 from model import GEMINITiny
 from dataset import RealGenomicEPDataset
@@ -39,7 +40,8 @@ def main():
                 global_step=global_step,
                 optimizer=optimizer,
                 criterion_bce=criterion_bce,
-                phase_thresholds=phase_thresholds
+                phase_thresholds=phase_thresholds,
+                device=device
             )
             global_step += 1
             
@@ -52,7 +54,7 @@ def main():
     loop_samples = []
     with torch.no_grad():
         for batch in test_loader:
-            if torch.sum(batch['target']) > 0: # Check if there is an active loop
+            if torch.sum(batch['target_starts']) > 0: # Check if there is an active loop
                 loop_samples.append(batch)
                 if len(loop_samples) >= 3:
                     break
@@ -66,18 +68,30 @@ def main():
     
     for row_idx, sample in enumerate(loop_samples):
         x = sample['sequence'].to(device)
-        target = sample['target'].to(device)
         
         # Predict
         with torch.no_grad():
             mu2_settled, _, _, _ = model.forward_inference(x, steps=10, eta=0.05)
-            logits, probs = model.bm(mu2_settled)
+            (logits_starts, probs_starts), (logits_ends, probs_ends) = model.bm_starts(mu2_settled), model.bm_ends(mu2_settled)
             
-            # Detach tensors for plotting (slice out first 4 channels of sequence for A/C/G/T display)
+            # Detach tensors for plotting
             one_hot_seq = x[0, :, :4].cpu().numpy() # [32, 4]
-            true_matrix = target[0].cpu().numpy() # [32, 32]
-            # Threshold to get exactly +1.0 and 0.0 binary matrix
-            pred_matrix = (probs[0].detach().cpu().numpy() > 0.5).astype(float) # [32, 32]
+            true_starts = sample['target_starts'][0].cpu().numpy()
+            true_ends = sample['target_ends'][0].cpu().numpy()
+            
+            pred_starts = (probs_starts[0].detach().cpu().numpy() > 0.5).astype(float)
+            pred_ends = (probs_ends[0].detach().cpu().numpy() > 0.5).astype(float)
+            
+            # Create RGB composite for Ground Truth
+            # Red channel = Starts, Blue channel = Ends
+            true_rgb = np.zeros((32, 32, 3), dtype=np.float32)
+            true_rgb[:, :, 0] = true_starts
+            true_rgb[:, :, 2] = true_ends
+            
+            # Create RGB composite for Prediction
+            pred_rgb = np.zeros((32, 32, 3), dtype=np.float32)
+            pred_rgb[:, :, 0] = pred_starts
+            pred_rgb[:, :, 2] = pred_ends
             
         # Panel 1: Sequence One-hot (first 4 channels)
         im1 = axes[row_idx, 0].imshow(one_hot_seq.T, aspect='auto', cmap='Blues', interpolation='nearest')
@@ -89,18 +103,16 @@ def main():
         fig.colorbar(im1, ax=axes[row_idx, 0])
         
         # Panel 2: Ground Truth Interaction Map
-        im2 = axes[row_idx, 1].imshow(true_matrix, cmap='magma', interpolation='nearest', vmin=0, vmax=1)
-        axes[row_idx, 1].set_title(f"Sample {row_idx+1} Ground-Truth\n(Exact Binary Loop)")
+        axes[row_idx, 1].imshow(true_rgb, interpolation='nearest')
+        axes[row_idx, 1].set_title(f"Sample {row_idx+1} Ground-Truth\n(Red=Starts, Blue=Ends)")
         axes[row_idx, 1].set_xlabel("Genomic Sequence Coordinate")
         axes[row_idx, 1].set_ylabel("Genomic Sequence Coordinate")
-        fig.colorbar(im2, ax=axes[row_idx, 1])
         
         # Panel 3: Predicted Exact Binary Map
-        im3 = axes[row_idx, 2].imshow(pred_matrix, cmap='magma', interpolation='nearest', vmin=0, vmax=1)
-        axes[row_idx, 2].set_title(f"Sample {row_idx+1} Binary Prediction\n(Exact Thresholded Loop)")
+        axes[row_idx, 2].imshow(pred_rgb, interpolation='nearest')
+        axes[row_idx, 2].set_title(f"Sample {row_idx+1} Binary Prediction\n(Red=Starts, Blue=Ends)")
         axes[row_idx, 2].set_xlabel("Genomic Sequence Coordinate")
         axes[row_idx, 2].set_ylabel("Genomic Sequence Coordinate")
-        fig.colorbar(im3, ax=axes[row_idx, 2])
         
     plt.tight_layout()
     

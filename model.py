@@ -144,7 +144,10 @@ class GEMINITiny(nn.Module):
         self.cae = ContractiveAutoencoder(in_dim=5, out_dim=16)
         self.mhn = ModernHopfieldNetwork(num_slots=8, d_model=16)
         self.pc = PredictiveCodingBackbone()
-        self.bm = BoltzmannFusionHead(in_features=64, latent_dim=8)
+        
+        # Dual Boltzmann Heads to decouple start and end anchors
+        self.bm_starts = BoltzmannFusionHead(in_features=64, latent_dim=8)
+        self.bm_ends = BoltzmannFusionHead(in_features=64, latent_dim=8)
 
     def forward_inference(self, x, steps=10, eta=0.05):
         # x: [B, 32, 5]
@@ -194,6 +197,8 @@ class GEMINITiny(nn.Module):
         # Run inference state settling
         mu2_settled, _, _, _ = self.forward_inference(x, steps=steps, eta=eta)
         
-        # 5. Boltzmann Interaction Mapping
-        logits, probs = self.bm(mu2_settled)
-        return logits, probs
+        # 5. Dual Boltzmann Interaction Mapping
+        logits_starts, probs_starts = self.bm_starts(mu2_settled)
+        logits_ends, probs_ends = self.bm_ends(mu2_settled)
+        
+        return (logits_starts, probs_starts), (logits_ends, probs_ends)
