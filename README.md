@@ -59,6 +59,14 @@ Translates the top-level settled representations back into symmetric 3D contact 
 
 ---
 
+## 🛠️ Multi-Phase Training Strategy
+Training an energy-based sequence-to-structure model requires careful stabilization. We employ a dynamic, multi-phase curriculum optimization strategy (`train.py`):
+1. **Phase 1: CAE & MHN Warm-up**: Freezes the deep coupling layers and optimizes only the autoencoder and Hopfield retrieval against sequence reconstruction loss. Stabilizes the sequence embeddings first.
+2. **Phase 2: PC State Settling**: Unfreezes the Predictive Coding backbone. Focuses entirely on minimizing the hierarchical predictive residual errors (`loss_pc`) to ensure $\mu_1$ and $\mu_2$ learn a strong spatial structural layout.
+3. **Phase 3: Full Boltzmann Coupling**: Unfreezes the Boltzmann head and optimizes the joint loss. The model is now capable of mapping the stabilized structural representations into a robust 3D contact probability map using Binary Cross-Entropy and L1 Sparsity regularization.
+
+---
+
 ## 📈 Proof of Concept & Convergence
 The GEMINI-X architecture was validated by training on the Chromosome 22 sequence dataset:
 1. **End-to-End Gradient Propagation**: The unrolled state settling loop enabled direct target gradients to flow from the final Boltzmann head all the way back to the CAE.
