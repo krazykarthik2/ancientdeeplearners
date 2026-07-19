@@ -23,10 +23,10 @@ def main():
     pos_weight = torch.tensor([250.0], device=device)
     criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     
-    # 2. Train for a quick 700 steps to get clear predictions
-    print("Training model for 700 steps to learn motif-anchored loop mapping...")
+    # 2. Train for 3000 steps to get perfectly clear, sparse predictions
+    print("Training model for 3000 steps to learn motif-anchored loop mapping...")
     global_step = 0
-    total_steps = 700
+    total_steps = 3000
     phase_thresholds = (50, 200)
     
     while global_step < total_steps:
