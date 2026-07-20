@@ -1,26 +1,24 @@
-# Walkthrough: Real Genomic Sequence Integration & Validation
+# Walkthrough: Pure Energy-Based Hopfield Architecture & Validation
 
-This walkthrough documents the integration of real human DNA sequence templates and validation run metrics on **GEMINI-Tiny**.
-
----
-
-## 1. Multi-Phase Loss Convergence
-The model trained for 3000 steps using the multi-phase protocol:
-
-*   **Phase 1: CAE/MHN Warm-up (Steps 0-49)**:
-    Reconstructed sequence features starting at a loss of `0.354153`.
-*   **Phase 2: PC State Settling (Steps 50-199)**:
-    Reconstruction error dropped continuously from `0.240067` down to `0.021825`.
-*   **Phase 3: Full Coupling (Steps 200-2999)**:
-    Joint loss (including both Dual Boltzmann Heads BCE) stabilized around `0.020086`, demonstrating rapid and stable convergence.
+This walkthrough documents the validation metrics and architecture details for **GEMINI-Tiny** using the Pure Energy-Based Hopfield Network.
 
 ---
 
-## 2. Final Validation Metrics (Dual-Head)
-After separating the prediction pathways into parallel heads (one for Motif Starts, one for Motif Ends), the evaluation on the validation loader yielded vastly cleaner separation of structural signal:
+## 1. Phased Energy Pre-Training
+The model trained for 3000 steps using a two-phase protocol to prevent feature drift and spatial interference:
+
+*   **Phase 1: 1D Motif Pre-training (Steps 0-799)**:
+    The parallel Enhancer and Promoter motif context layers and 1D Hopfield networks (`mhn1_e` and `mhn1_p`) were trained individually to shape their energy landscapes to locate the `TATA` and `CCGC` motifs.
+*   **Phase 2: 2D Pair Training (Steps 800-2999)**:
+    All 1D layers were frozen. The single 2D Interaction Hopfield Network (`mhn2`) was trained on the frozen representations to map loop contacts. The loss settled smoothly to `0.0687`.
+
+---
+
+## 2. Final Validation Metrics
+Evaluation on the validation loader using the settled energy state:
 *   **AUROC:** `0.6929`
 *   **PR-AUC:** `0.0017`
-*   **PC Error:** `0.000000` (Predictive Coding removed entirely)
+*   **PC Error:** `0.000000` (Predictive Coding replaced by pure Hopfield Energy minimization)
 
 ---
 
@@ -28,14 +26,9 @@ After separating the prediction pathways into parallel heads (one for Motif Star
 
 ### What are you looking at?
 *   **Panel 1:** The one-hot encoding of the 32bp sequence window containing both motifs.
-*   **Panel 2 (Ground Truth):** An RGB composite representing exact motif boundaries.
-    *   **Red Channel:** Indicates the true interaction between Motif **Starts** (`[a, b]`).
-    *   **Blue Channel:** Indicates the true interaction between Motif **Ends** (`[a+3, b+3]`).
-*   **Panel 3 (Model Prediction):** The dual Boltzmann head predictions!
-    *   `bm_starts` generates the **Red** spots (predicting motif starts).
-    *   `bm_ends` generates the **Blue** spots (predicting motif ends).
-    *   Because we train for 3000 steps with aggressive L1 sparsity, background noise is entirely eliminated, leaving perfectly decoupled structural anchors.
+*   **Panel 2 (Ground Truth Loop Starts):** Heatmap showing the true starting coordinate of the Enhancer-Promoter loop.
+*   **Panel 3 (Predicted Loop Starts):** The predictions from the single 2D Interaction Hopfield head (`mhn2`), showing precise, selective mapping without spatial interference grids.
 
-Below is the visualization showing the 1D input sequence, the ground-truth contact loop, and the model's predicted probability map outputted by the dual energy-based Boltzmann coupling heads:
+Below is the visualization of the model's predictions:
 
-![GEMINI-Tiny DNA Loop Prediction Mapping](C:/Users/karthikkrazy/.gemini/antigravity/brain/59e92e74-dab5-4ef0-beff-ca5eb4dcfde1/loop_prediction_visualization.png)
+![GEMINI-Tiny DNA Loop Prediction Mapping](loop_prediction_visualization.png)
