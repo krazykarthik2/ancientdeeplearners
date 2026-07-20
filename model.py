@@ -90,6 +90,9 @@ class GEMINITiny(nn.Module):
         super().__init__()
         self.cae = ContractiveAutoencoder(in_dim=5, out_dim=16)
         
+        # Sequence Context Layer to provide a spatial receptive field of 4 (e.g. for "TATA")
+        self.sequence_context = nn.Conv1d(in_channels=16, out_channels=16, kernel_size=4, stride=1, padding=3)
+        
         # MHN-1: Memorize and identify individual E and P motifs from 1D sequence
         self.mhn1 = ModernHopfieldNetwork(num_slots=8, d_model=16)
         
@@ -102,9 +105,18 @@ class GEMINITiny(nn.Module):
         # x: [B, 32, 5]
         B, L, _ = x.shape
         
-        # 1. 1D Motif Identification (MHN-1)
+        # 1. 1D Motif Identification (MHN-1) with Receptive Field
         cae_out = self.cae(x) # [B, L, 16]
-        H1, _ = self.mhn1(cae_out) # [B, L, 16]
+        
+        # Apply 1D convolution over sequence length
+        cae_out_t = cae_out.transpose(1, 2) # [B, 16, L]
+        context_out = F.leaky_relu(self.sequence_context(cae_out_t)) # [B, 16, L+3]
+        
+        # Crop padding to keep length exactly L (take the first L elements)
+        context_out = context_out[:, :, :L] # [B, 16, L]
+        context_out = context_out.transpose(1, 2) # [B, L, 16]
+        
+        H1, _ = self.mhn1(context_out) # [B, L, 16]
         
         # 2. Construct 2D Pair Features
         # H1_i: [B, L, 1, 16], H1_j: [B, 1, L, 16]
