@@ -1,216 +1,142 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import matplotlib
+import torch, torch.nn as nn, torch.nn.functional as F
+import numpy as np, matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from torch.utils.data import Dataset, DataLoader
 from model3d import GEMINI3D
-import random
 
 class Synthetic3DDataset(Dataset):
     def __init__(self, num_samples=500, window=64, seed=42):
-        self.num_samples = num_samples
         self.window = window
-        self.seed = seed
         self.rng = np.random.RandomState(seed)
         self.samples = []
-        for s in range(num_samples):
-            seq, contact_3d, coords_3d = self._generate_3d_sample()
-            self.samples.append((seq, contact_3d, coords_3d))
+        for _ in range(num_samples):
+            seq, contact, coords = self._generate()
+            self.samples.append((seq, contact, coords))
 
-    def _generate_3d_sample(self):
+    def _generate(self):
         L = self.window
         seq = np.zeros((L, 5), dtype=np.float32)
-        bases = ['A', 'C', 'G', 'T']
-        nuc_to_idx = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
+        bases, ni = ['A','C','G','T'], {'A':0,'C':1,'G':2,'T':3}
         for i in range(L):
-            nuc = self.rng.choice(bases, p=[0.26, 0.24, 0.24, 0.26])
-            seq[i, nuc_to_idx[nuc]] = 1.0
-        seq[:, 4] = 1.0 - seq[:, :4].sum(axis=1)
+            n = self.rng.choice(bases, p=[0.26,0.24,0.24,0.26])
+            seq[i, ni[n]] = 1.0
+        gap = self.rng.randint(8, 24)
+        e_pos = self.rng.randint(2, L//3)
+        p_pos = min(e_pos + gap, L - 6)
+        if p_pos == L - 6: e_pos = p_pos - gap
+        for off,n in enumerate([3,0,3,0]):
+            seq[e_pos+off,:4]=0; seq[e_pos+off,n]=1.0
+        for off,n in enumerate([1,1,2,1]):
+            seq[p_pos+off,:4]=0; seq[p_pos+off,n]=1.0
+        seq[:,4] = 1.0 - seq[:,:4].sum(axis=1)
 
-        e_pos = self.rng.randint(0, L // 4 - 4)
-        p_pos = self.rng.randint(L // 2, L - 4)
-        for off in range(4):
-            if e_pos + off < L:
-                seq[e_pos + off, :4] = 0
-                seq[e_pos + off, 4] = 1.0
-            if p_pos + off < L:
-                seq[p_pos + off, :4] = 0
-                seq[p_pos + off, 4] = 1.0
-        if e_pos + 4 <= L:
-            tata = [3, 0, 3, 0]
-            for off, n in enumerate(tata):
-                seq[e_pos + off, :4] = 0
-                seq[e_pos + off, n] = 1.0
-        if p_pos + 4 <= L:
-            ccgc = [1, 1, 2, 1]
-            for off, n in enumerate(ccgc):
-                seq[p_pos + off, :4] = 0
-                seq[p_pos + off, n] = 1.0
-        seq[:, 4] = 1.0 - seq[:, :4].sum(axis=1)
-
-        coords = np.zeros((L, 3), dtype=np.float32)
-        theta = 0.0
-        for i in range(L):
-            theta += self.rng.normal(0.3, 0.3)
-            phi = self.rng.uniform(0, 2 * np.pi)
-            step = 1.0
-            dx = step * np.sin(theta) * np.cos(phi)
-            dy = step * np.sin(theta) * np.sin(phi)
-            dz = step * np.cos(theta)
-            if i == 0:
-                coords[i] = [0, 0, 0]
-            else:
-                coords[i] = coords[i-1] + [dx, dy, dz]
-        loop_center = (coords[e_pos] + coords[p_pos]) / 2
-        for i in range(L):
-            dist_to_ep = min(abs(i - e_pos), abs(i - p_pos))
-            pull = 0.5 * np.exp(-dist_to_ep / 8.0)
-            coords[i] = coords[i] * (1 - pull) + loop_center * pull
-
-        dist = np.zeros((L, L), dtype=np.float32)
+        contact = np.zeros((L,L), dtype=np.float32)
         for i in range(L):
             for j in range(L):
-                d = np.linalg.norm(coords[i] - coords[j])
-                dist[i, j] = d
-        contact = 1.0 / (1.0 + (dist / 3.0) ** 3)
-        contact += 0.5 * np.exp(-(((np.arange(L)[:, None] - np.arange(L)[None, :]) / 20.0) ** 2))
-        contact = np.clip(contact, 0.0, 1.0)
+                d = abs(i-j)
+                contact[i,j] = np.exp(-d/15.0) + 0.3*np.exp(-d/3.0)
+        for peak in [3.0]:
+            contact[e_pos,p_pos] += peak; contact[p_pos,e_pos] += peak
+            for i in range(L):
+                for j in range(L):
+                    de = abs(i-e_pos)+abs(j-p_pos)
+                    dp = abs(i-p_pos)+abs(j-e_pos)
+                    contact[i,j] += peak*np.exp(-min(de,dp)/6.0)
+        contact = np.clip(contact, 0, 1)
 
+        coords = np.zeros((L,3), dtype=np.float32)
+        t = np.linspace(0, 4*np.pi, L)
+        coords[:,0] = np.sin(t)*5 + np.random.randn(L)*0.5
+        coords[:,1] = np.cos(t*0.7)*4 + np.random.randn(L)*0.5
+        coords[:,2] = t*0.3 + np.random.randn(L)*0.3
+        lc = (coords[e_pos]+coords[p_pos])/2
+        for i in range(L):
+            pull = 0.8*np.exp(-min(abs(i-e_pos),abs(i-p_pos))/5.0)
+            coords[i] = coords[i]*(1-pull) + lc*pull
+        coords -= coords.mean(axis=0, keepdims=True)
+        coords /= coords.std() + 0.01
         return seq, contact, coords
 
-    def __len__(self):
-        return self.num_samples
-
+    def __len__(self): return len(self.samples)
     def __getitem__(self, idx):
-        seq, contact, coords = self.samples[idx]
-        return {
-            'sequence': torch.FloatTensor(seq),
-            'contact': torch.FloatTensor(contact),
-            'coords': torch.FloatTensor(coords),
-        }
+        s,c,crd = self.samples[idx]
+        return {'sequence': torch.FloatTensor(s),
+                'contact': torch.FloatTensor(c),
+                'coords': torch.FloatTensor(crd)}
 
+def contact_corr(p,t):
+    n=p.shape[0]; pu=p[np.triu_indices(n,1)]; tu=t[np.triu_indices(n,1)]
+    return np.corrcoef(pu,tu)[0,1]
 
-def train_3d(model, loader, opt, epochs=20, device='cpu'):
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0.0
-        for batch in loader:
-            x = batch['sequence'].to(device)
-            target = batch['contact'].to(device)
-            opt.zero_grad()
-            logits, probs, _ = model(x)
-            loss = F.binary_cross_entropy(probs, target)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            total_loss += loss.item()
-        if (epoch + 1) % 5 == 0:
-            print(f"  Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(loader):.6f}")
+def procrustes(X,Y):
+    X-=X.mean(axis=0,keepdims=True); Y-=Y.mean(axis=0,keepdims=True)
+    U,_,Vt=np.linalg.svd(Y.T@X,full_matrices=False)
+    return Y@(U@Vt)
 
-
-def evaluate_3d(model, dataset, device='cpu'):
-    model.eval()
-    idx = np.random.randint(len(dataset))
-    sample = dataset[idx]
-    x = sample['sequence'].unsqueeze(0).to(device)
-    true_coords = sample['coords'].numpy()
-    true_contact = sample['contact'].numpy()
-
-    pred_coords, pred_contact = model.predict_3d(x)
-
-    n = pred_contact.shape[0]
-    true_upper = true_contact[np.triu_indices(n, 1)]
-    pred_upper = pred_contact[np.triu_indices(n, 1)]
-    corr = np.corrcoef(true_upper, pred_upper)[0, 1]
-    print(f"  Contact correlation: {corr:.4f}")
-
-    fig = plt.figure(figsize=(18, 6))
-    ax1 = fig.add_subplot(131)
-    ax1.imshow(true_contact, cmap='Greys_r', vmin=0, vmax=1)
-    ax1.set_title("True Contact Map")
-    ax1.set_xlabel("Position"); ax1.set_ylabel("Position")
-
-    ax2 = fig.add_subplot(132)
-    ax2.imshow(pred_contact, cmap='Greys_r', vmin=0, vmax=1)
-    ax2.set_title(f"Predicted (r={corr:.3f})")
-    ax2.set_xlabel("Position"); ax2.set_ylabel("Position")
-
-    ax3 = fig.add_subplot(133, projection='3d')
-    ax3.scatter(true_coords[:, 0], true_coords[:, 1], true_coords[:, 2],
-                c=range(n), cmap='viridis', s=40, label='True')
-    ax3.scatter(pred_coords[:, 0], pred_coords[:, 1], pred_coords[:, 2],
-                c=range(n), cmap='plasma', s=20, marker='x', label='Predicted')
-    ax3.set_title("3D Reconstruction")
-    ax3.legend()
-
-    plt.tight_layout()
-    plt.savefig('3d_reconstruction.png', dpi=150, bbox_inches='tight')
-    print(f"Saved to 3d_reconstruction.png")
-    plt.close()
-    return corr
-
+def eval_contact(model,loader,device):
+    model.eval(); corrs=[]
+    with torch.no_grad():
+        for b in loader:
+            x=b['sequence'].to(device); t=b['contact'].numpy()
+            _,_,pr,_=model(x)
+            for bb in range(pr.shape[0]): corrs.append(contact_corr(pr[bb].cpu().numpy(),t[bb]))
+    return float(np.mean(corrs))
 
 if __name__ == '__main__':
-    device = 'cpu'
-    window = 64
-    print(f"=== GEMINI-3D: Deep Boltzmann Machine for Hi-C 3D Reconstruction ===")
-    print(f"Window: {window}bp, Device: {device}")
+    device='cpu'; window=64
+    print(f"=== GEMINI-3D: Boltzmann Force Refinement ===")
 
-    print("\nGenerating synthetic 3D Hi-C data...")
-    train_ds = Synthetic3DDataset(num_samples=500, window=window, seed=42)
-    val_ds = Synthetic3DDataset(num_samples=50, window=window, seed=100)
-    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+    train_ds=Synthetic3DDataset(num_samples=500,window=window,seed=42)
+    val_ds=Synthetic3DDataset(num_samples=100,window=window,seed=100)
+    tl=DataLoader(train_ds,batch_size=16,shuffle=True)
+    vl=DataLoader(val_ds,batch_size=16,shuffle=False)
 
-    model = GEMINI3D(window=window, dim=32).to(device)
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total params: {total_params:,}, Trainable: {trainable:,}")
+    model=GEMINI3D(window=window,dim=32,refine_steps=30).to(device)
+    print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
 
-    print("\nPhase 1: Training contact predictor...")
-    opt1 = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    train_3d(model, train_loader, opt1, epochs=30, device=device)
+    print("Phase 1: Contact predictor (40 epochs)...")
+    opt=torch.optim.AdamW(model.parameters(),lr=1e-3,weight_decay=1e-4)
+    for ep in range(40):
+        model.train(); tot=0.0
+        for b in tl:
+            x=b['sequence'].to(device); tc=b['contact'].to(device)
+            opt.zero_grad()
+            _,_,pr,_=model(x)
+            loss=F.binary_cross_entropy(pr,tc); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+            opt.step(); tot+=loss.item()
+        if (ep+1)%10==0 or ep==0:
+            vc=eval_contact(model,vl,device)
+            print(f"  Ep {ep+1:2d}/40 Loss:{tot/len(tl):.4f} Val:{vc:.4f}")
 
-    print("\nPhase 2: Pre-training Deep Boltzmann Machine...")
-    model.dbm.rbm1.W.data *= 0.1
-    model.dbm.rbm2.W.data *= 0.1
-    for epoch in range(10):
-        avg_grad1, avg_grad2 = 0.0, 0.0
-        for batch in train_loader:
-            x = batch['sequence'].to(device)
-            target = batch['contact'].to(device)
-            with torch.no_grad():
-                _, probs, _ = model(x)
-            L = probs.shape[1]
-            triu = torch.triu_indices(L, L, offset=1)
-            v = target[:, triu[0], triu[1]]
-            v_pred = probs[:, triu[0], triu[1]]
-            v_combined = (v + v_pred) / 2
-            g1, g2 = model.dbm.pretrain(v_combined, lr=0.005, k=1)
-            avg_grad1 += g1; avg_grad2 += g2
-        if (epoch + 1) % 5 == 0:
-            print(f"  Epoch {epoch+1}, |dW1|={avg_grad1/len(train_loader):.4f}, |dW2|={avg_grad2/len(train_loader):.4f}")
+    print("Phase 2: DBM pretrain (15 epochs)...")
+    model.dbm.rbm1.W.data.mul_(0.5); model.dbm.rbm2.W.data.mul_(0.5)
+    for ep in range(15):
+        g1,g2=0.0,0.0
+        for b in tl:
+            x=b['sequence'].to(device); tc=b['contact'].to(device)
+            with torch.no_grad(): _,_,pr,_=model(x)
+            L=pr.shape[1]; triu=torch.triu_indices(L,L,offset=1)
+            v=tc[:,triu[0],triu[1]]; vp=pr[:,triu[0],triu[1]]
+            gg1,gg2=model.dbm.pretrain((v+vp)/2,lr=0.002,k=1)
+            g1+=gg1; g2+=gg2
+        if (ep+1)%5==0: print(f"  Ep {ep+1:2d}/15 |dW1|={g1/len(tl):.1f} |dW2|={g2/len(tl):.1f}")
 
-    print("\nPhase 3: Fine-tuning with refinement...")
-    opt3 = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    for epoch in range(10):
-        total_loss = 0.0
-        for batch in train_loader:
-            x = batch['sequence'].to(device)
-            target = batch['contact'].to(device)
-            opt3.zero_grad()
-            _, _, probs_refined = model(x, refine=True)
-            loss = F.binary_cross_entropy(probs_refined, target)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt3.step()
-            total_loss += loss.item()
-        if (epoch + 1) % 5 == 0:
-            print(f"  Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.6f}")
-
-    print("\nEvaluating 3D reconstruction...")
-    corr = evaluate_3d(model, val_ds, device=device)
-    print(f"\nDone. Final contact correlation: {corr:.4f}")
+    print("Final evaluation..."); model.eval()
+    fig,axes=plt.subplots(5,3,figsize=(15,20)); corrs=[]
+    for idx in range(5):
+        s=val_ds[np.random.randint(len(val_ds))]
+        x=s['sequence'].unsqueeze(0).to(device)
+        tc=s['contact'].numpy(); ty=s['coords'].numpy()
+        py,pc=model.predict_3d(x); r=contact_corr(pc,tc); corrs.append(r)
+        pa=procrustes(ty,py)
+        axes[idx][0].imshow(tc,cmap='Greys_r',vmin=0,vmax=1); axes[idx][0].set_title(f"True [{idx+1}]")
+        axes[idx][1].imshow(pc,cmap='Greys_r',vmin=0,vmax=1); axes[idx][1].set_title(f"Pred (r={r:.3f})")
+        a2=fig.add_subplot(5,3,idx*3+3,projection='3d')
+        a2.scatter(ty[:,0],ty[:,1],ty[:,2],c=range(len(ty)),cmap='viridis',s=30,label='True')
+        a2.scatter(pa[:,0],pa[:,1],pa[:,2],c=range(len(pa)),cmap='plasma',s=15,marker='x',label='Pred')
+        a2.set_title(f"3D (r={r:.3f})")
+    plt.tight_layout(); plt.savefig('3d_reconstruction.png',dpi=150,bbox_inches='tight'); plt.close()
+    print(f"Mean contact corr: {np.mean(corrs):.4f}")
