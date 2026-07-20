@@ -18,9 +18,9 @@ The model trained for 3000 steps using the multi-phase protocol:
 
 ## 2. Final Validation Metrics (Dual-Head)
 After separating the prediction pathways into parallel heads (one for Motif Starts, one for Motif Ends), the evaluation on the validation loader yielded vastly cleaner separation of structural signal:
-*   **AUROC:** `0.7647`
-*   **PR-AUC:** `0.0190`
-*   **PC Error:** `0.000031`
+*   **AUROC:** `0.6721`
+*   **PR-AUC:** `0.0016`
+*   **PC Error:** `0.000000` (Predictive Coding removed entirely)
 
 ---
 
@@ -38,4 +38,4 @@ After separating the prediction pathways into parallel heads (one for Motif Star
 
 Below is the visualization showing the 1D input sequence, the ground-truth contact loop, and the model's predicted probability map outputted by the dual energy-based Boltzmann coupling heads:
 
-![GEMINI-Tiny DNA Loop Prediction Mapping](loop_prediction_visualization.png)
+![GEMINI-Tiny DNA Loop Prediction Mapping](C:/Users/karthikkrazy/.gemini/antigravity/brain/59e92e74-dab5-4ef0-beff-ca5eb4dcfde1/loop_prediction_visualization.png)
