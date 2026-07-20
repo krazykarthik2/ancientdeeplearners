@@ -102,7 +102,7 @@ class GEMINITiny(nn.Module):
         # Pair features will be concatenation of (H_E_i, H_P_j) so d_pair = 16 + 16 = 32
         self.mhn2 = InteractionHopfieldNetwork(d_pair=32, num_slots=1)
 
-    def forward(self, x, steps=10, eta=0.05):
+    def forward(self, x, steps=10, eta=0.05, include_interaction_energy=True):
         # x: [B, 32, 5]
         B, L, _ = x.shape
         
@@ -128,16 +128,20 @@ class GEMINITiny(nn.Module):
                 E1_e, _ = self.mhn1_e(z_e) # [B, L]
                 E1_p, _ = self.mhn1_p(z_p) # [B, L]
                 
-                # Construct 2D Cross-Pair Features
-                z_e_i = z_e.unsqueeze(2).expand(B, L, L, 16)
-                z_p_j = z_p.unsqueeze(1).expand(B, L, L, 16)
-                pair_features = torch.cat([z_e_i, z_p_j], dim=-1).view(B, L*L, 32)
-                
-                # 2D interaction energy
-                _, _, E2 = self.mhn2(pair_features) # [B, L, L]
-                
-                # Total energy to minimize
-                loss_energy = torch.mean(E1_e) + torch.mean(E1_p) + torch.mean(E2)
+                if include_interaction_energy:
+                    # Construct 2D Cross-Pair Features
+                    z_e_i = z_e.unsqueeze(2).expand(B, L, L, 16)
+                    z_p_j = z_p.unsqueeze(1).expand(B, L, L, 16)
+                    pair_features = torch.cat([z_e_i, z_p_j], dim=-1).view(B, L*L, 32)
+                    
+                    # 2D interaction energy
+                    _, _, E2 = self.mhn2(pair_features) # [B, L, L]
+                    
+                    # Total energy to minimize (Motifs + Interaction)
+                    loss_energy = torch.mean(E1_e) + torch.mean(E1_p) + torch.mean(E2)
+                else:
+                    # Total energy to minimize (Motifs Only during pre-training)
+                    loss_energy = torch.mean(E1_e) + torch.mean(E1_p)
                 
                 # Gradient update on both states
                 grad_z_e, grad_z_p = torch.autograd.grad(loss_energy, [z_e, z_p])

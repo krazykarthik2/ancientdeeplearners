@@ -33,11 +33,12 @@ def train_step(model, batch, global_step, optimizer, criterion_bce, phase_thresh
     
     optimizer.zero_grad()
     
-    # Forward pass
-    (logits_starts, probs_starts), (probs_1d_e, probs_1d_p) = model(x)
-    
     # Unpack thresholds (Phase 1: pretrain steps)
     motif_pretrain_steps, _ = phase_thresholds
+    
+    # Forward pass (only include interaction energy in Phase 2)
+    include_interaction = (global_step >= motif_pretrain_steps)
+    (logits_starts, probs_starts), (probs_1d_e, probs_1d_p) = model(x, include_interaction_energy=include_interaction)
     
     if global_step < motif_pretrain_steps:
         # --- PHASE 1: PRE-TRAIN 1D MOTIF Hopfields ---
