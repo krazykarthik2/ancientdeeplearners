@@ -98,14 +98,10 @@ class BoltzmannFusionHead(nn.Module):
         self.W_proj = nn.Linear(in_features, latent_dim)
         self.J = nn.Parameter(torch.randn(latent_dim, latent_dim))
         
-        # Learnable sequence upsampler to sharply map length 8 -> 32 without linear smoothing/blurring
-        self.upsample_seq = nn.ConvTranspose1d(
-            in_channels=latent_dim, 
-            out_channels=latent_dim, 
-            kernel_size=4, 
-            stride=4, 
-            padding=0
-        )
+        # Fully connected sequence upsampler (length 8 -> 32)
+        # We use a Linear layer over the sequence dimension to break translational invariance,
+        # completely preventing the shared-kernel "ghosting/interference" caused by ConvTranspose1d.
+        self.upsample_seq = nn.Linear(8, 32)
         
         # Initial negative bias to cleanly suppress sparse background contacts
         self.bias = nn.Parameter(torch.tensor(-4.5))
@@ -122,10 +118,13 @@ class BoltzmannFusionHead(nn.Module):
         # Permute to apply Linear on channel dimension
         z = mu2.transpose(1, 2) # [B, 8, 64] (length=8, channels=64)
         z = self.W_proj(z) # [B, 8, 8] (length=8, channels=8)
-        z = z.transpose(1, 2) # [B, 8, 8] (channels=8, length=8)
         
-        # 2. Sharply upsample sequence length 8 -> 32 and apply ReLU to enforce sparsity
-        z_upsampled = F.relu(self.upsample_seq(z)) # [B, 8, 32] (channels=8, length=32)
+        # 2. Upsample sequence length 8 -> 32 using dense projection
+        # Currently z is [B, 8, 8] (length=8, channels=8). 
+        # We want to project the length dimension.
+        # Transpose to [B, channels=8, length=8] so Linear applies to the length dim.
+        z = z.transpose(1, 2) # [B, 8, 8] (channels, length)
+        z_upsampled = F.relu(self.upsample_seq(z)) # [B, 8, 32] (channels, length)
         z_upsampled = z_upsampled.transpose(1, 2) # [B, 32, 8] (length=32, channels=8)
         
         # 3. Symmetric Coupling Matrix J
