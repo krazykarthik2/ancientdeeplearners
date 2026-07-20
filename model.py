@@ -44,22 +44,20 @@ class ModernHopfieldNetwork(nn.Module):
         # Query projection W_q
         self.W_q = nn.Linear(d_model, d_model, bias=False)
         self.beta = 1.0 / math.sqrt(d_model)
+        self.bias = nn.Parameter(torch.tensor(-3.0))
 
     def forward(self, x):
         # x: [B, L, 16]
         Q = self.W_q(x) # [B, L, 16]
         
-        # M: [8, 16]
-        # Q @ M.T: [B, L, 8]
-        scores = torch.matmul(Q, self.M.transpose(-2, -1)) * self.beta
-        attn = torch.softmax(scores, dim=-1) # [B, L, 8]
-        
-        # Retrieve: [B, L, 16]
-        retrieved = torch.matmul(attn, self.M)
-        return retrieved, attn
+        # LogSumExp energy formulation for Modern Hopfield Network
+        dot_products = torch.matmul(Q, self.M.transpose(-2, -1)) # [B, L, num_slots]
+        energy = - (1.0 / self.beta) * torch.logsumexp(self.beta * dot_products, dim=-1) # [B, L]
+        probs = torch.sigmoid(-energy + self.bias)
+        return energy, probs
 
 class InteractionHopfieldNetwork(nn.Module):
-    def __init__(self, d_pair=32, num_slots=4):
+    def __init__(self, d_pair=32, num_slots=1):
         super().__init__()
         # Memory slots for valid interactions
         self.M = nn.Parameter(torch.randn(num_slots, d_pair))
@@ -72,17 +70,19 @@ class InteractionHopfieldNetwork(nn.Module):
         # pair_features: [B, L*L, d_pair]
         Q = self.W_q(pair_features) # [B, L*L, d_pair]
         
-        # scores: [B, L*L, num_slots]
-        scores = torch.matmul(Q, self.M.transpose(-2, -1)) * self.beta
-        
-        # Aggregate across slots to get a single logit per pair
-        logits = torch.sum(scores, dim=-1) + self.bias # [B, L*L]
-        probs = torch.sigmoid(logits)
+        dot_products = torch.matmul(Q, self.M.transpose(-2, -1)) # [B, L*L, num_slots]
+        # LogSumExp energy formulation
+        energy = - (1.0 / self.beta) * torch.logsumexp(self.beta * dot_products, dim=-1) # [B, L*L]
         
         # Reshape to [B, L, L]
-        B, LL = logits.shape
+        B, LL = energy.shape
         L = int(math.sqrt(LL))
-        return logits.view(B, L, L), probs.view(B, L, L)
+        energy_2d = energy.view(B, L, L)
+        
+        # Logits derived directly from negative energy of the pairing state
+        logits = -energy_2d + self.bias
+        probs = torch.sigmoid(logits)
+        return logits, probs, energy_2d
 
 
 class GEMINITiny(nn.Module):
@@ -90,43 +90,72 @@ class GEMINITiny(nn.Module):
         super().__init__()
         self.cae = ContractiveAutoencoder(in_dim=5, out_dim=16)
         
-        # Sequence Context Layer to provide a spatial receptive field of 4 (e.g. for "TATA")
-        self.sequence_context = nn.Conv1d(in_channels=16, out_channels=16, kernel_size=4, stride=1, padding=3)
+        # Parallel Sequence Context Layers for Enhancer (E) and Promoter (P)
+        self.sequence_context_e = nn.Conv1d(in_channels=16, out_channels=16, kernel_size=5, stride=1, padding=2)
+        self.sequence_context_p = nn.Conv1d(in_channels=16, out_channels=16, kernel_size=5, stride=1, padding=2)
         
-        # MHN-1: Memorize and identify individual E and P motifs from 1D sequence
-        self.mhn1 = ModernHopfieldNetwork(num_slots=8, d_model=16)
+        # Parallel 1D Motif Hopfield Networks (MHN-1)
+        self.mhn1_e = ModernHopfieldNetwork(num_slots=8, d_model=16)
+        self.mhn1_p = ModernHopfieldNetwork(num_slots=8, d_model=16)
         
-        # MHN-2: Memorize and identify 2D Interaction Pairs (Starts and Ends)
-        # Pair features will be concatenation of (H_i, H_j) so d_pair = 16 + 16 = 32
-        self.mhn2_starts = InteractionHopfieldNetwork(d_pair=32, num_slots=4)
-        self.mhn2_ends = InteractionHopfieldNetwork(d_pair=32, num_slots=4)
+        # Single 2D Interaction Hopfield Network (MHN-2)
+        # Pair features will be concatenation of (H_E_i, H_P_j) so d_pair = 16 + 16 = 32
+        self.mhn2 = InteractionHopfieldNetwork(d_pair=32, num_slots=1)
 
-    def forward(self, x):
+    def forward(self, x, steps=10, eta=0.05):
         # x: [B, 32, 5]
         B, L, _ = x.shape
         
-        # 1. 1D Motif Identification (MHN-1) with Receptive Field
+        # 1. Obtain initial states using CAE and Parallel Sequence Contexts
         cae_out = self.cae(x) # [B, L, 16]
+        cae_out_t = cae_out.transpose(1, 2)
         
-        # Apply 1D convolution over sequence length
-        cae_out_t = cae_out.transpose(1, 2) # [B, 16, L]
-        context_out = F.leaky_relu(self.sequence_context(cae_out_t)) # [B, 16, L+3]
+        context_out_e = F.leaky_relu(self.sequence_context_e(cae_out_t)).transpose(1, 2) # [B, L, 16]
+        context_out_p = F.leaky_relu(self.sequence_context_p(cae_out_t)).transpose(1, 2) # [B, L, 16]
+            
+        # Initialize continuous states z_e and z_p for the energy model
+        z_e = context_out_e.detach()
+        z_p = context_out_p.detach()
         
-        # Crop padding to keep length exactly L (take the first L elements)
-        context_out = context_out[:, :, :L] # [B, 16, L]
-        context_out = context_out.transpose(1, 2) # [B, L, 16]
+        # 2. Iterative Energy Minimization (State Settling)
+        with torch.enable_grad():
+            for step in range(steps):
+                # Detach and require grad to make states leaf tensors for this step
+                z_e = z_e.detach().requires_grad_(True)
+                z_p = z_p.detach().requires_grad_(True)
+                
+                # 1D motif energies
+                E1_e, _ = self.mhn1_e(z_e) # [B, L]
+                E1_p, _ = self.mhn1_p(z_p) # [B, L]
+                
+                # Construct 2D Cross-Pair Features
+                z_e_i = z_e.unsqueeze(2).expand(B, L, L, 16)
+                z_p_j = z_p.unsqueeze(1).expand(B, L, L, 16)
+                pair_features = torch.cat([z_e_i, z_p_j], dim=-1).view(B, L*L, 32)
+                
+                # 2D interaction energy
+                _, _, E2 = self.mhn2(pair_features) # [B, L, L]
+                
+                # Total energy to minimize
+                loss_energy = torch.mean(E1_e) + torch.mean(E1_p) + torch.mean(E2)
+                
+                # Gradient update on both states
+                grad_z_e, grad_z_p = torch.autograd.grad(loss_energy, [z_e, z_p])
+                
+                # Update out-of-graph
+                with torch.no_grad():
+                    z_e = z_e - eta * grad_z_e
+                    z_p = z_p - eta * grad_z_p
+                
+        # 3. Final pairing pass under settled states
+        z_e_i = z_e.unsqueeze(2).expand(B, L, L, 16)
+        z_p_j = z_p.unsqueeze(1).expand(B, L, L, 16)
+        pair_features = torch.cat([z_e_i, z_p_j], dim=-1).view(B, L*L, 32)
         
-        H1, _ = self.mhn1(context_out) # [B, L, 16]
+        logits, probs, _ = self.mhn2(pair_features)
         
-        # 2. Construct 2D Pair Features
-        # H1_i: [B, L, 1, 16], H1_j: [B, 1, L, 16]
-        H1_i = H1.unsqueeze(2).expand(B, L, L, 16)
-        H1_j = H1.unsqueeze(1).expand(B, L, L, 16)
-        pair_features = torch.cat([H1_i, H1_j], dim=-1) # [B, L, L, 32]
-        pair_features = pair_features.view(B, L*L, 32)
+        # Get 1D predictions under settled states for motif pre-training
+        _, probs_1d_e = self.mhn1_e(z_e)
+        _, probs_1d_p = self.mhn1_p(z_p)
         
-        # 3. 2D Interaction Identification (MHN-2)
-        logits_starts, probs_starts = self.mhn2_starts(pair_features)
-        logits_ends, probs_ends = self.mhn2_ends(pair_features)
-        
-        return (logits_starts, probs_starts), (logits_ends, probs_ends)
+        return (logits, probs), (probs_1d_e, probs_1d_p)

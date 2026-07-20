@@ -20,15 +20,15 @@ def main():
     
     model = GEMINITiny().to(device)
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    # Add positive weight (250x) to counter class imbalance (2 active cells vs 1022 inactive)
-    pos_weight = torch.tensor([250.0], device=device)
+    # Add positive weight (15x) to counter class imbalance but prevent massive false-positive interference
+    pos_weight = torch.tensor([15.0], device=device)
     criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     
     # 2. Train for 3000 steps to get perfectly clear, sparse predictions
     print("Training model for 3000 steps to learn motif-anchored loop mapping...")
     global_step = 0
     total_steps = 3000
-    phase_thresholds = (50, 200)
+    phase_thresholds = (800, 3000)
     
     while global_step < total_steps:
         for batch in loader:
@@ -71,26 +71,13 @@ def main():
         
         # Predict
         with torch.no_grad():
-            (logits_starts, probs_starts), (logits_ends, probs_ends) = model(x)
+            (logits_starts, probs_starts), _ = model(x)
             
             # Detach tensors for plotting
             one_hot_seq = x[0, :, :4].cpu().numpy() # [32, 4]
             true_starts = sample['target_starts'][0].cpu().numpy()
-            true_ends = sample['target_ends'][0].cpu().numpy()
             
             pred_starts = (probs_starts[0].detach().cpu().numpy() > 0.5).astype(float)
-            pred_ends = (probs_ends[0].detach().cpu().numpy() > 0.5).astype(float)
-            
-            # Create RGB composite for Ground Truth
-            # Red channel = Starts, Blue channel = Ends
-            true_rgb = np.zeros((32, 32, 3), dtype=np.float32)
-            true_rgb[:, :, 0] = true_starts
-            true_rgb[:, :, 2] = true_ends
-            
-            # Create RGB composite for Prediction
-            pred_rgb = np.zeros((32, 32, 3), dtype=np.float32)
-            pred_rgb[:, :, 0] = pred_starts
-            pred_rgb[:, :, 2] = pred_ends
             
         # Panel 1: Sequence One-hot (first 4 channels)
         im1 = axes[row_idx, 0].imshow(one_hot_seq.T, aspect='auto', cmap='Blues', interpolation='nearest')
@@ -101,17 +88,19 @@ def main():
         axes[row_idx, 0].set_yticklabels(['A', 'C', 'G', 'T'])
         fig.colorbar(im1, ax=axes[row_idx, 0])
         
-        # Panel 2: Ground Truth Interaction Map
-        axes[row_idx, 1].imshow(true_rgb, interpolation='nearest')
-        axes[row_idx, 1].set_title(f"Sample {row_idx+1} Ground-Truth\n(Red=Starts, Blue=Ends)")
+        # Panel 2: Ground Truth Interaction Map (Starts)
+        im2 = axes[row_idx, 1].imshow(true_starts, cmap='Reds', interpolation='nearest')
+        axes[row_idx, 1].set_title(f"Sample {row_idx+1} Ground-Truth Loop Starts")
         axes[row_idx, 1].set_xlabel("Genomic Sequence Coordinate")
         axes[row_idx, 1].set_ylabel("Genomic Sequence Coordinate")
+        fig.colorbar(im2, ax=axes[row_idx, 1])
         
-        # Panel 3: Predicted Exact Binary Map
-        axes[row_idx, 2].imshow(pred_rgb, interpolation='nearest')
-        axes[row_idx, 2].set_title(f"Sample {row_idx+1} Binary Prediction\n(Red=Starts, Blue=Ends)")
+        # Panel 3: Predicted Exact Binary Map (Starts)
+        im3 = axes[row_idx, 2].imshow(pred_starts, cmap='Reds', interpolation='nearest')
+        axes[row_idx, 2].set_title(f"Sample {row_idx+1} Predicted Loop Starts")
         axes[row_idx, 2].set_xlabel("Genomic Sequence Coordinate")
         axes[row_idx, 2].set_ylabel("Genomic Sequence Coordinate")
+        fig.colorbar(im3, ax=axes[row_idx, 2])
         
     plt.tight_layout()
     

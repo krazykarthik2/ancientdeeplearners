@@ -18,8 +18,8 @@ The model trained for 3000 steps using the multi-phase protocol:
 
 ## 2. Final Validation Metrics (Dual-Head)
 After separating the prediction pathways into parallel heads (one for Motif Starts, one for Motif Ends), the evaluation on the validation loader yielded vastly cleaner separation of structural signal:
-*   **AUROC:** `0.9936`
-*   **PR-AUC:** `0.1356`
+*   **AUROC:** `0.7456`
+*   **PR-AUC:** `0.0036`
 *   **PC Error:** `0.000000` (Predictive Coding removed entirely)
 
 ---
