@@ -11,105 +11,105 @@ from dataset import RealGenomicEPDataset
 from train import train_step
 
 def main():
-    device = torch.device("cpu")
-    print("Preparing data and initializing model for visualization...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on {device}...")
     
-    # 1. Prepare small dataset
     dataset = RealGenomicEPDataset(num_samples=400, seed=42)
-    loader = DataLoader(dataset, batch_size=16, shuffle=True)
+    loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=0)
     
     model = GEMINITiny().to(device)
     optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    # Add positive weight (15x) to counter class imbalance but prevent massive false-positive interference
-    pos_weight = torch.tensor([15.0], device=device)
+    pos_weight = torch.tensor([60.0], device=device)
     criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     
-    # 2. Train for 3000 steps to get perfectly clear, sparse predictions
-    print("Training model for 3000 steps to learn motif-anchored loop mapping...")
+    phase_thresholds = (2000, 6000)
+    total_steps = 6000
     global_step = 0
-    total_steps = 3000
-    phase_thresholds = (800, 3000)
     
     while global_step < total_steps:
         for batch in loader:
             if global_step >= total_steps:
                 break
-            train_step(
-                model=model,
-                batch=batch,
-                global_step=global_step,
-                optimizer=optimizer,
-                criterion_bce=criterion_bce,
-                phase_thresholds=phase_thresholds,
-                device=device
-            )
+            train_step(model, batch, global_step, optimizer, criterion_bce, phase_thresholds, device)
+            if global_step % 500 == 0:
+                print(f"Step {global_step}/{total_steps}")
             global_step += 1
-            
-    print("Training finished. Extracting 3 loop-positive test samples...")
     
-    # 3. Find 3 samples that contain active loops
+    print("Finding positive samples...")
     model.eval()
-    test_loader = DataLoader(dataset, batch_size=1, shuffle=False)
-    
+    test_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
     loop_samples = []
     with torch.no_grad():
         for batch in test_loader:
-            if torch.sum(batch['target_starts']) > 0: # Check if there is an active loop
+            if torch.sum(batch['target_starts']) > 0:
                 loop_samples.append(batch)
                 if len(loop_samples) >= 3:
                     break
-                    
-    # Fallback if we don't have 3 positive samples
     while len(loop_samples) < 3:
         loop_samples.append(next(iter(test_loader)))
-        
-    # 4. Predict and Plot all 3 samples in a 3x3 grid
-    fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+    
+    fig, axes = plt.subplots(3, 4, figsize=(22, 15))
     
     for row_idx, sample in enumerate(loop_samples):
         x = sample['sequence'].to(device)
         
-        # Predict
         with torch.no_grad():
-            (logits_starts, probs_starts), _ = model(x)
+            (logits_starts, probs_starts), ((p1e, p1e_p), (p1p, p1p_p)) = model(x, settle=False)
             
-            # Detach tensors for plotting
-            one_hot_seq = x[0, :, :4].cpu().numpy() # [32, 4]
-            true_starts = sample['target_starts'][0].cpu().numpy()
+            one_hot = x[0, :, :4].cpu().numpy()
+            true_map = sample['target_starts'][0].cpu().numpy()
+            prob_map = probs_starts[0].detach().cpu().numpy()
             
-            pred_starts = (probs_starts[0].detach().cpu().numpy() > 0.5).astype(float)
+            seq_str = ''.join(['ACGT'[np.argmax(one_hot[j])] if np.max(one_hot[j]) > 0.5 else 'N' for j in range(32)])
             
-        # Panel 1: Sequence One-hot (first 4 channels)
-        im1 = axes[row_idx, 0].imshow(one_hot_seq.T, aspect='auto', cmap='Blues', interpolation='nearest')
-        axes[row_idx, 0].set_title(f"Sample {row_idx+1} DNA Input sequence\n[A, C, G, T]")
-        axes[row_idx, 0].set_xlabel("Genomic Sequence Index")
-        axes[row_idx, 0].set_ylabel("Nucleotide Channels")
-        axes[row_idx, 0].set_yticks([0, 1, 2, 3])
-        axes[row_idx, 0].set_yticklabels(['A', 'C', 'G', 'T'])
-        fig.colorbar(im1, ax=axes[row_idx, 0])
+            mot_e = p1e_p[0].detach().cpu().numpy()
+            mot_p = p1p_p[0].detach().cpu().numpy()
         
-        # Panel 2: Ground Truth Interaction Map (Starts)
-        im2 = axes[row_idx, 1].imshow(true_starts, cmap='Reds', interpolation='nearest')
-        axes[row_idx, 1].set_title(f"Sample {row_idx+1} Ground-Truth Loop Starts")
-        axes[row_idx, 1].set_xlabel("Genomic Sequence Coordinate")
-        axes[row_idx, 1].set_ylabel("Genomic Sequence Coordinate")
-        fig.colorbar(im2, ax=axes[row_idx, 1])
+        # Panel 1: DNA sequence as text heatmap
+        ax = axes[row_idx, 0]
+        im = ax.imshow(one_hot.T, aspect='auto', cmap='Blues', interpolation='nearest')
+        ax.set_yticks([0,1,2,3])
+        ax.set_yticklabels(['A','C','G','T'])
+        ax.set_xlabel('Position')
+        ax.set_ylabel('Base')
+        ax.set_title(f'Sample {row_idx+1}\n{seq_str}', fontsize=9)
+        fig.colorbar(im, ax=ax)
         
-        # Panel 3: Predicted Exact Binary Map (Starts)
-        im3 = axes[row_idx, 2].imshow(pred_starts, cmap='Reds', interpolation='nearest')
-        axes[row_idx, 2].set_title(f"Sample {row_idx+1} Predicted Loop Starts")
-        axes[row_idx, 2].set_xlabel("Genomic Sequence Coordinate")
-        axes[row_idx, 2].set_ylabel("Genomic Sequence Coordinate")
-        fig.colorbar(im3, ax=axes[row_idx, 2])
+        # Panel 2: 1D motif predictions
+        ax = axes[row_idx, 1]
+        x_pos = np.arange(32)
+        ax.bar(x_pos-0.15, mot_e, width=0.3, alpha=0.7, color='blue', label='TATA')
+        ax.bar(x_pos+0.15, mot_p, width=0.3, alpha=0.7, color='red', label='CCGC')
+        ax.set_xlabel('Position')
+        ax.set_ylabel('Motif Prob')
+        ax.set_title('1D Motif Detection')
+        ax.legend(fontsize=8)
+        ax.set_ylim(0, 1)
+        
+        # Panel 3: Ground truth (2 red dots)
+        ax = axes[row_idx, 2]
+        ax.imshow(true_map, cmap='Reds', interpolation='nearest', vmin=0, vmax=1)
+        ax.set_xlabel('Position')
+        ax.set_ylabel('Position')
+        ax.set_title('Ground Truth\nLoop Positions')
+        
+        # Panel 4: Raw probability heatmap
+        ax = axes[row_idx, 3]
+        im = ax.imshow(prob_map, cmap='Greys_r', interpolation='nearest', vmin=0, vmax=1.0)
+        ax.set_xlabel('Position')
+        ax.set_ylabel('Position')
+        ax.set_title(f'Prediction\nmean={np.mean(prob_map):.4f} max={np.max(prob_map):.4f}')
+        fig.colorbar(im, ax=ax)
+        
+        true_rows, true_cols = np.where(true_map > 0)
+        for tr, tc in zip(true_rows, true_cols):
+            ax.plot(tc, tr, 'o', color='lime', markersize=8, markeredgecolor='white', markeredgewidth=1.5)
         
     plt.tight_layout()
-    
-    # Save image to artifact folder
-    output_path = r"C:\Users\karthikkrazy\.gemini\antigravity\brain\59e92e74-dab5-4ef0-beff-ca5eb4dcfde1\loop_prediction_visualization.png"
-    plt.savefig(output_path, dpi=150)
+    output_path = os.path.join(os.path.dirname(__file__), "loop_prediction_visualization.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
-    
-    print(f"Successfully generated and saved visualization to {output_path}")
+    print(f"Saved to {output_path}")
 
 if __name__ == "__main__":
     main()

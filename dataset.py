@@ -30,7 +30,7 @@ class RealGenomicEPDataset(Dataset):
         url = "https://rest.ensembl.org/sequence/region/human/22:30000000..30050000?content-type=application/json"
         try:
             req = urllib.request.Request(url, headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 return data.get('seq', '').upper()
         except Exception as e:
