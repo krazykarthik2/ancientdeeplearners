@@ -71,8 +71,7 @@ def main():
         
         # Predict
         with torch.no_grad():
-            mu2_settled, _, _, _ = model.forward_inference(x, steps=10, eta=0.05)
-            (logits_starts, probs_starts), (logits_ends, probs_ends) = model.bm_starts(mu2_settled), model.bm_ends(mu2_settled)
+            (logits_starts, probs_starts), (logits_ends, probs_ends) = model(x)
             
             # Detach tensors for plotting
             one_hot_seq = x[0, :, :4].cpu().numpy() # [32, 4]

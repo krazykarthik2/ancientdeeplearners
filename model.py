@@ -58,146 +58,63 @@ class ModernHopfieldNetwork(nn.Module):
         retrieved = torch.matmul(attn, self.M)
         return retrieved, attn
 
-class PredictiveCodingBackbone(nn.Module):
-    def __init__(self):
+class InteractionHopfieldNetwork(nn.Module):
+    def __init__(self, d_pair=32, num_slots=4):
         super().__init__()
-        # Generative Weights (Transposed Convolutions)
-        # Level 2 state: [B, 64, 8] -> predicts Level 1 state: [B, 32, 16]
-        self.W2 = nn.ConvTranspose1d(in_channels=64, out_channels=32, 
-                                     kernel_size=4, stride=2, padding=1)
-        # Level 1 state: [B, 32, 16] -> predicts Level 0 lookup: [B, 16, 32]
-        self.W1 = nn.ConvTranspose1d(in_channels=32, out_channels=16, 
-                                     kernel_size=4, stride=2, padding=1)
-        
-        # Bottom-up helper layers to initialize PC states quickly
-        self.init_conv1 = nn.Conv1d(in_channels=16, out_channels=32, 
-                                    kernel_size=4, stride=2, padding=1)
-        self.init_conv2 = nn.Conv1d(in_channels=32, out_channels=64, 
-                                    kernel_size=4, stride=2, padding=1)
-
-    def initialize_states(self, x_lookup):
-        # x_lookup: [B, 16, 32] (channels=16, length=32)
-        # Initialize mu1 and mu2 via bottom-up helper convs
-        mu1 = F.leaky_relu(self.init_conv1(x_lookup)) # [B, 32, 16]
-        mu2 = F.leaky_relu(self.init_conv2(mu1))      # [B, 64, 8]
-        
-        # Track gradients on intermediate tensors without detaching from bottom-up graph
-        mu1.requires_grad_(True)
-        mu2.requires_grad_(True)
-        return mu1, mu2
-
-    def forward_prediction(self, mu1, mu2):
-        # Generative predictions
-        mu1_pred = F.leaky_relu(self.W2(mu2)) # [B, 32, 16]
-        x_pred = F.leaky_relu(self.W1(mu1))   # [B, 16, 32]
-        return x_pred, mu1_pred
-
-class BoltzmannFusionHead(nn.Module):
-    def __init__(self, in_features=64, latent_dim=8):
-        super().__init__()
-        self.W_proj = nn.Linear(in_features, latent_dim)
-        self.J = nn.Parameter(torch.randn(latent_dim, latent_dim))
-        
-        # Fully connected sequence upsampler (length 8 -> 32)
-        # We use a Linear layer over the sequence dimension to break translational invariance,
-        # completely preventing the shared-kernel "ghosting/interference" caused by ConvTranspose1d.
-        self.upsample_seq = nn.Linear(8, 32)
-        
-        # Initial negative bias to cleanly suppress sparse background contacts
+        # Memory slots for valid interactions
+        self.M = nn.Parameter(torch.randn(num_slots, d_pair))
+        self.W_q = nn.Linear(d_pair, d_pair, bias=False)
+        self.beta = 1.0 / math.sqrt(d_pair)
+        # Strong negative bias to cleanly suppress background pairs
         self.bias = nn.Parameter(torch.tensor(-4.5))
-        
-        # Initialize symmetric coupling matrix J
-        with torch.no_grad():
-            self.J.copy_(0.5 * (self.J + self.J.T))
 
-    def forward(self, mu2):
-        # mu2 state: [B, 64, 8]
-        B = mu2.shape[0]
+    def forward(self, pair_features):
+        # pair_features: [B, L*L, d_pair]
+        Q = self.W_q(pair_features) # [B, L*L, d_pair]
         
-        # 1. Project channels 64 -> 8
-        # Permute to apply Linear on channel dimension
-        z = mu2.transpose(1, 2) # [B, 8, 64] (length=8, channels=64)
-        z = self.W_proj(z) # [B, 8, 8] (length=8, channels=8)
+        # scores: [B, L*L, num_slots]
+        scores = torch.matmul(Q, self.M.transpose(-2, -1)) * self.beta
         
-        # 2. Upsample sequence length 8 -> 32 using dense projection
-        # Currently z is [B, 8, 8] (length=8, channels=8). 
-        # We want to project the length dimension.
-        # Transpose to [B, channels=8, length=8] so Linear applies to the length dim.
-        z = z.transpose(1, 2) # [B, 8, 8] (channels, length)
-        z_upsampled = F.relu(self.upsample_seq(z)) # [B, 8, 32] (channels, length)
-        z_upsampled = z_upsampled.transpose(1, 2) # [B, 32, 8] (length=32, channels=8)
-        
-        # 3. Symmetric Coupling Matrix J
-        J_sym = 0.5 * (self.J + self.J.T)
-        
-        # 4. Energy calculation to generate final 32x32 interaction matrix with bias
-        # logits_ij = z_i^T J_sym z_j + bias
-        # z_upsampled: [B, L, 8]
-        logits = torch.matmul(torch.matmul(z_upsampled, J_sym), z_upsampled.transpose(-2, -1)) + self.bias
+        # Aggregate across slots to get a single logit per pair
+        logits = torch.sum(scores, dim=-1) + self.bias # [B, L*L]
         probs = torch.sigmoid(logits)
-        return logits, probs
+        
+        # Reshape to [B, L, L]
+        B, LL = logits.shape
+        L = int(math.sqrt(LL))
+        return logits.view(B, L, L), probs.view(B, L, L)
+
 
 class GEMINITiny(nn.Module):
     def __init__(self):
         super().__init__()
         self.cae = ContractiveAutoencoder(in_dim=5, out_dim=16)
-        self.mhn = ModernHopfieldNetwork(num_slots=8, d_model=16)
-        self.pc = PredictiveCodingBackbone()
         
-        # Dual Boltzmann Heads to decouple start and end anchors
-        self.bm_starts = BoltzmannFusionHead(in_features=64, latent_dim=8)
-        self.bm_ends = BoltzmannFusionHead(in_features=64, latent_dim=8)
+        # MHN-1: Memorize and identify individual E and P motifs from 1D sequence
+        self.mhn1 = ModernHopfieldNetwork(num_slots=8, d_model=16)
+        
+        # MHN-2: Memorize and identify 2D Interaction Pairs (Starts and Ends)
+        # Pair features will be concatenation of (H_i, H_j) so d_pair = 16 + 16 = 32
+        self.mhn2_starts = InteractionHopfieldNetwork(d_pair=32, num_slots=4)
+        self.mhn2_ends = InteractionHopfieldNetwork(d_pair=32, num_slots=4)
 
-    def forward_inference(self, x, steps=10, eta=0.05):
+    def forward(self, x):
         # x: [B, 32, 5]
-        # 1. CAE Encoding
-        cae_out = self.cae(x) # [B, 32, 16]
+        B, L, _ = x.shape
         
-        # 2. MHN Dictionary lookup
-        x_lookup, attn = self.mhn(cae_out) # [B, 32, 16], [B, 32, 8]
+        # 1. 1D Motif Identification (MHN-1)
+        cae_out = self.cae(x) # [B, L, 16]
+        H1, _ = self.mhn1(cae_out) # [B, L, 16]
         
-        # Reshape to match ConvTranspose1d sequence input expectation: [B, 16, 32]
-        x_lookup_t = x_lookup.transpose(1, 2)
+        # 2. Construct 2D Pair Features
+        # H1_i: [B, L, 1, 16], H1_j: [B, 1, L, 16]
+        H1_i = H1.unsqueeze(2).expand(B, L, L, 16)
+        H1_j = H1.unsqueeze(1).expand(B, L, L, 16)
+        pair_features = torch.cat([H1_i, H1_j], dim=-1) # [B, L, L, 32]
+        pair_features = pair_features.view(B, L*L, 32)
         
-        # 3. Initialize Predictive Coding States
-        mu1, mu2 = self.pc.initialize_states(x_lookup_t)
-        
-        # 4. Iterative Inference (Unrolled State Settling)
-        with torch.enable_grad():
-            for step in range(steps):
-                x_pred, mu1_pred = self.pc.forward_prediction(mu1, mu2)
-                
-                # Compute predictive residuals (errors)
-                eps0 = x_lookup_t - x_pred
-                eps1 = mu1 - mu1_pred
-                eps2 = mu2 # Prior regularization
-                
-                # Mean Squared Error sum
-                loss_pc = torch.mean(eps0 ** 2) + torch.mean(eps1 ** 2) + 0.01 * torch.mean(eps2 ** 2)
-                
-                # Compute gradients of PC loss w.r.t state tensors
-                grad_mu1, grad_mu2 = torch.autograd.grad(
-                    loss_pc, [mu1, mu2], 
-                    create_graph=True,
-                    retain_graph=True
-                )
-                
-                # Explicit unrolled gradient update steps
-                mu1 = mu1 - eta * grad_mu1
-                mu2 = mu2 - eta * grad_mu2
-            
-        # Return settled states
-        if self.training:
-            return mu2, mu1, x_lookup_t, attn
-        else:
-            return mu2.detach(), mu1.detach(), x_lookup_t, attn
-
-    def forward(self, x, steps=10, eta=0.05):
-        # Run inference state settling
-        mu2_settled, _, _, _ = self.forward_inference(x, steps=steps, eta=eta)
-        
-        # 5. Dual Boltzmann Interaction Mapping
-        logits_starts, probs_starts = self.bm_starts(mu2_settled)
-        logits_ends, probs_ends = self.bm_ends(mu2_settled)
+        # 3. 2D Interaction Identification (MHN-2)
+        logits_starts, probs_starts = self.mhn2_starts(pair_features)
+        logits_ends, probs_ends = self.mhn2_ends(pair_features)
         
         return (logits_starts, probs_starts), (logits_ends, probs_ends)
