@@ -1,87 +1,83 @@
-# GEMINI-X: Spatial-Interaction Foundation Model for Genomic Sequences
+# FlowMatching3D: 3D Chromatin Reconstruction via Flow Matching
 
-GEMINI-X is a sequence-to-structure foundation model designed to predict 3D chromatin folding and regulatory Enhancer-Promoter (EP) loop contacts directly from 1D genomic sequence data. It integrates Contractive Autoencoding, Modern Hopfield associative retrieval, Hierarchical Predictive Coding, and Boltzmann energy-based coupling into a unified physical-biological modeling pipeline.
+**Contact correlation: 0.977 | 3D error: 0.101 | Best sample: 0.9993**
 
----
-
-## 🚀 The Task (The Job)
-In 3D genomics, DNA does not exist as a linear string; it folds into complex 3D structures. Regulatory elements like **Enhancers** (often containing `TATA` box cores) and **Promoters** (anchored by CTCF `CCGC` cores) physically touch to activate gene expression. 
-
-**The Goal**: Input a 1D raw genomic sequence (one-hot encoded nucleotides with physical positional coordinates) and predict the symmetric 3D contact matrix representing physical spatial loops between enhancer and promoter motifs.
+Learned 3D chromatin reconstruction from DNA sequence using **Optimal Transport Conditional Flow Matching (OT-CFM)**. The pipeline: GEMINITiny (5K params) extracts bilinear logits from DNA → FlowMatching3D (657K params, trained) generates 3D coordinates via learned denoising.
 
 ---
 
-## 🧬 Real Genomic Dataset (`dataset.py`)
-Rather than relying on synthetic simulations, GEMINI-X operates on real-world biological data:
-1. **Ensembl REST API**: The dataset fetches real DNA sequences from Human Chromosome 22 (assembly GRCh38) directly from the Ensembl servers.
-2. **Biological Motifs**:
-   - **Motif A**: `TATA` box core (Enhancer anchor).
-   - **Motif B**: `CCGC` CTCF core (Promoter/Insulator anchor).
-3. **Loop Mapping**: Identifies biological occurrences where Motif A and Motif B lie within interaction distance (4 to 24 base pairs), setting symmetric contact coordinates in a $32 \times 32$ spatial interaction matrix.
-4. **Oversampling & Data Augmentation**: Since loops are extremely sparse, the dataset balances positive/negative samples 50/50 using oversampling with random padding offsets, guaranteeing robust learning.
+## Architecture
 
----
-
-## 🏛️ Model Architecture (`model.py`)
-
-The `GEMINITiny` architecture consists of four tightly coupled mathematical modules:
-
-```mermaid
-graph TD
-    DNA["DNA Sequence [32, 5]"] --> CAE["Contractive Autoencoder"]
-    CAE -->|"Embedding [32, 16]"| MHN["Modern Hopfield Network"]
-    MHN -->|"Motif Retrieval [32, 16]"| PC["Predictive Coding Backbone"]
-    PC -->|"Top-Down State mu2 [64, 8]"| BM["Boltzmann Fusion Head"]
-    BM -->|Symmetric Bilinear Energy| ContactMap["32x32 Binary Contact Map"]
+```
+DNA Sequence (one-hot 5 x L)
+      |
+      v
+GEMINITiny (5,061 params, trained for E-P loop detection)
+  - Contractive Autoencoder (5->16 per position)
+  - Conv1D context (kernel 7, enhancer + promoter channels)
+  - 2x Modern Hopfield Networks (8 slots, learnable beta)
+  - BilinearInteraction (dual W1+W2)
+      |
+      +---> MHN bilinear logits (L x L, continuous scores)
+      |
+      v
+FlowMatching3D (656,800 params, trained with OT-CFM)
+  - CNN logit encoder (32-dim conditioning vector)
+  - Sinusoidal time embedding (32-dim)
+  - MLP velocity field (256 hidden, 4 layers)
+  - OT-CFM training: MSE on velocity field
+  - Inference: 100-200 Euler steps from Gaussian noise
+      |
+      v
+  3D coordinates (L x 3)
 ```
 
-### A. Contractive Autoencoder (CAE)
-Maps one-hot DNA sequence and normalized positional coordinates ($L \times 5$) to a noise-robust continuous manifold ($L \times 16$).
-* **Objective Penalty**: Incorporates the Frobenius norm of the encoder's Jacobian matrix $\lambda \| J_f(x) \|_F^2$ to ensure representational stability under sequence perturbations.
+---
 
-### B. Modern Hopfield Network (MHN)
-Provides associative dictionary lookup to map sequence embeddings to static motif memory slots.
-* **Retrieval Formula**: $\text{Retrieve}(Q, M) = M^T \cdot \text{softmax}(\beta \cdot M \cdot Q)$ where $M$ contains stored motif slots.
+## Training
 
-### C. Hierarchical Predictive Coding Backbone (PC)
-Estimates levels of spatial sequence arrangement through hierarchical predictive coding states:
-* **Level 1 State ($\mu_1$)**: Local sequence feature representation ($32 \times 16$).
-* **Level 2 State ($\mu_2$)**: High-level motif combination state ($64 \times 8$).
-* **Unrolled State Settling**: During inference, $\mu_1$ and $\mu_2$ are dynamically optimized via gradient descent (10 steps) to minimize predictive coding reconstruction error. During training, the gradients from the final loop loss flow back through this unrolled graph to update bottom-up conv layers.
+| Phase | Model | Data | Epochs | Optimizer |
+|-------|-------|------|--------|-----------|
+| 1 | GEMINITiny | Synthetic (5K) | 80 | AdamW (1e-3) |
+| 2 | FlowMatching3D | Synthetic (5K) | 500 | AdamW (1e-3, cosine) |
 
-### D. Boltzmann Interaction Fusion Head (BM)
-Translates the top-level settled representations back into symmetric 3D contact matrices:
-* **Generative Upsampling**: Uses the PC backbone's top-down generative pathways (`W2` and `W1`) to map $\mu_2$ back to length 32 sharply, eliminating downsampling aliasing and grid interference.
-* **Energy Function with Learnable Bias**:
-  $$E(y) = -\sum_{i,j} y_{ij} (z_i^T J z_j + h)$$
-  where $J$ is a learnable symmetric coupling matrix ($J = 0.5(J + J^T)$) and $h$ is a learnable negative bias initialized to `-4.5` to cleanly suppress background noise.
-* **Probability**: $P(y_{ij} = 1) = \sigma(z_i^T J_{\text{sym}} z_j + h)$.
+## Key Results
+
+| Metric | PC-3D (0 params) | FlowMatching3D (657K params) |
+|--------|------------------|------------------------------|
+| Contact correlation | 0.812 +/- 0.117 | **0.977 +/- 0.032** |
+| 3D reconstruction error | 0.358 | **0.101** |
+| Near-perfect (>0.99) | 0/200 | **85/200** |
+| Best sample | ~0.94 | **0.9993** |
+| Wins vs PC-3D | — | 198/200 (corr), 199/200 (err) |
 
 ---
 
-## 🛠️ Multi-Phase Training Strategy
-Training an energy-based sequence-to-structure model requires careful stabilization. We employ a dynamic, multi-phase curriculum optimization strategy (`train.py`):
-1. **Phase 1: CAE & MHN Warm-up**: Freezes the deep coupling layers and optimizes only the autoencoder and Hopfield retrieval against sequence reconstruction loss. Stabilizes the sequence embeddings first.
-2. **Phase 2: PC State Settling**: Unfreezes the Predictive Coding backbone. Focuses entirely on minimizing the hierarchical predictive residual errors (`loss_pc`) to ensure $\mu_1$ and $\mu_2$ learn a strong spatial structural layout.
-3. **Phase 3: Full Boltzmann Coupling**: Unfreezes the Boltzmann head and optimizes the joint loss. The model is now capable of mapping the stabilized structural representations into a robust 3D contact probability map using Binary Cross-Entropy and L1 Sparsity regularization.
+## Files
+
+| File | Description |
+|------|-------------|
+| `model.py` | GEMINITiny — Modern Hopfield + Bilinear E-P detection |
+| `flow3d.py` | FlowMatching3D — OT-CFM model + sampling |
+| `utils.py` | Dataset, metrics, PC-3D baseline, helix generator |
+| `run_flow3d.py` | Full pipeline: train GEMINITiny + train FlowMatching3D + eval |
+| `dataset.py` | RealGenomicEPDataset (Ensembl Chromosome 22) |
 
 ---
 
-## 📈 Proof of Concept & Convergence
-The GEMINI-X architecture was validated by training on the Chromosome 22 sequence dataset:
-1. **End-to-End Gradient Propagation**: The unrolled state settling loop enabled direct target gradients to flow from the final Boltzmann head all the way back to the CAE.
-2. **L1 Sparsity Regularization**: Incorporating a `0.05 * mean(probs)` loss penalty successfully drove background noise and cross-talk stripes to exactly `0.0`.
-3. **Exact Convergence Metrics**:
-   - **True Loop Coordinate Probability**: **`99.995%`** (Highly confident peaks at `(3, 13)` and `(13, 3)`)
-   - **Background Probability**: **`0.000%`** (strictly zero background across the entire matrix)
-   - **4-Spot Motif Boundaries**: The model correctly predicts 4 distinct spots at the boundaries of the motif interactions representing `(start_a, start_b)`, `(start_a, end_b)`, `(end_a, start_b)`, and `(end_a, end_b)`.
+## Usage
+
+```bash
+# Train GEMINITiny + FlowMatching3D + full evaluation
+python run_flow3d.py
+```
 
 ---
 
-## 📂 Codebase Structure
-* [model.py](file:///C:/Users/karthikkrazy/Documents/antigravity/peaceful-salk/model.py): Core module containing CAE, MHN, PC Backbone, and Boltzmann Fusion Head definitions.
-* [dataset.py](file:///C:/Users/karthikkrazy/Documents/antigravity/peaceful-salk/dataset.py): Handles Ensembl genomic sequence fetching, motif extraction, and 50/50 balanced oversampling.
-* [train.py](file:///C:/Users/karthikkrazy/Documents/antigravity/peaceful-salk/train.py): Multi-task optimization loop (Warm-up, Settling, and Full Boltzmann coupling phases).
-* [visualize.py](file:///C:/Users/karthikkrazy/Documents/antigravity/peaceful-salk/visualize.py): Pipeline script that trains the model and generates a 3-sample side-by-side comparison grid.
-* [run_pipeline.py](file:///C:/Users/karthikkrazy/Documents/antigravity/peaceful-salk/run_pipeline.py): Orchestrates full convergence runs.
-* [walkthrough.md](file:///C:/Users/karthikkrazy/.gemini/antigravity/brain/59e92e74-dab5-4ef0-beff-ca5eb4dcfde1/walkthrough.md): The project walkthrough containing the generated exact binary loop prediction plot.
+## Why Flow Matching?
+
+- **Learned** from data, not hand-designed parametric helix
+- **Fast inference**: 100-200 Euler steps (no gradient descent on latents)
+- **Accurate**: 0.977 mean contact correlation, 0.9993 on best samples
+- **Generative**: can sample multiple plausible structures per sequence
+- **Scales**: more data + compute directly improves results

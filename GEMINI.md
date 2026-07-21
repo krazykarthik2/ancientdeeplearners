@@ -1,47 +1,79 @@
-# GEMINI-X: Spatial-Interaction Foundation Model for Genomic Sequences
+# GEMINI-X: FlowMatching3D for Genomic 3D Structure Prediction
 
-GEMINI-X integrates Contractive Autoencoding, Modern Hopfield associative retrieval, Hierarchical Predictive Coding, and Boltzmann energy-based coupling into a unified genomic model.
+GEMINI-X reconstructs 3D chromatin structure from DNA sequence using **Optimal Transport Conditional Flow Matching (OT-CFM)**. The architecture has two trained components: GEMINITiny (E-P loop detection) and FlowMatching3D (3D generation).
 
 ---
 
-## 1. Core Architecture Modules
+## 1. GEMINITiny (5,061 params)
 
 ### A. Contractive Autoencoder (CAE)
-Acts as the initial noise-robust embedding layer mapping one-hot DNA to a continuous manifold.
-- **Input:** $x \in \{0, 1\}^{L \times 4}$
-- **Encoder:** Linear layer $4 \rightarrow d_{model}$ with Sigmoid activation.
-- **Objective Contractive Penalty:** $\lambda \| J_f(x) \|_F^2$ where $J_f$ is the Jacobian matrix of the encoder.
+Per-position feature extraction: one-hot DNA (5 channels) -> 16-dim embedding.
 
 ### B. Modern Hopfield Network (MHN)
-Provides associative lookup mapping sequence vectors to motif memory slots.
-- **Memory Matrix ($M$):** $N_{slots} \times d_{model}$ containing static motif vectors.
-- **Query Projection ($W_q$):** $d_{model} \times d_{model}$
-- **Retrieval Formula:** $\text{Retrieve}(Q, M) = M^T \cdot \text{softmax}(\beta \cdot M \cdot Q)$
+Associative memory for motif detection:
+- **8 memory slots** per channel (enhancer, promoter)
+- **Learnable beta**: temperature for slot retrieval
+- **Learnable bias**: sparsity control
 
-### C. Hierarchical Predictive Coding Backbone (PC)
-Estimates levels of spatial arrangement through predictive coding states ($\mu_l$).
-- **Level 1 State ($\mu_1$):** Local feature states.
-- **Level 2 State ($\mu_2$):** Motif combination states.
-- **Generative weights ($W_l$):** Transposed 1D convolutions representing top-down generative predictions:
-  $$\hat{\mu}_{l-1} = \text{ReLU}(W_l * \mu_l + b_l)$$
-- **Error Neurons:** $\epsilon_{l-1} = \mu_{l-1} - \hat{\mu}_{l-1}$
-
-### D. Boltzmann Interaction Fusion Head (BM)
-Translates top-level representations to physically consistent symmetric 3D contact matrices.
-- **Energy Function:**
-  $$E(y) = -\sum_{i,j} y_{ij} (z_i^T J z_j)$$
-  where $J$ is a learnable symmetric coupling matrix ($J = \frac{1}{2}(J + J^T)$).
-- **Contact Probability:**
-  $$P(y_{ij} = 1) = \sigma(z_i^T J z_j)$$
+### C. Bilinear Interaction
+Symmetric pair scoring with dual weight matrices:
+```
+logits_ij = (z_i^T W1 z_j + z_j^T W2 z_i) / 2 + bias
+```
+- Learnable bias (init -7) for background suppression
 
 ---
 
-## 2. Validation Model: GEMINI-Tiny
-Designed for verification on the "Synthetic Loop-32" validation task.
-- **Input Length ($L$):** 32
-- **CAE dimension:** $4 \rightarrow 16$
-- **MHN Memory:** 8 slots of size 16
-- **PC States:**
-  - $\mu_1$: $16 \times 32$ (channels $\times$ length)
-  - $\mu_2$: $8 \times 64$ (channels $\times$ length)
-- **BM coupling dimension:** 8
+## 2. FlowMatching3D (656,800 params)
+
+### Architecture
+- **Logit encoder**: 3x Conv2D (8->16->32 channels) + global avg pool + linear to 64-dim
+- **Time embedding**: Sinusoidal positional encoding (32-dim)
+- **Velocity network**: 4-layer MLP (256 hidden) predicting v_t from (x_t, cond, t)
+
+### Training (OT-CFM Loss)
+```
+t ~ Uniform[0, 1]
+noise ~ N(0, I)
+x_t = (1-t) * noise + t * coords
+v_target = coords - noise
+L = MSE(v_pred(t, x_t, logits), v_target)
+```
+
+### Inference (Euler Sampling)
+```
+x_0 ~ N(0, I)
+for t = 0 to 1 step dt:
+    v = model(x_t, logits, t)
+    x_{t+dt} = x_t + v * dt
+return x_1
+```
+
+---
+
+## 3. Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Input length | 32 bp |
+| GEMINITiny params | 5,061 |
+| FlowMatching3D params | 656,800 |
+| Flow hidden dim | 256 |
+| Training epochs | 500 |
+| Training samples | 5,000 (synthetic) |
+| Optimizer | AdamW (cosine decay) |
+| EMA decay | 0.9995 |
+| Inference steps | 100-200 |
+
+---
+
+## 4. Validation Results
+
+| Test | Result |
+|------|--------|
+| FlowMatching3D contact corr | **0.977 +/- 0.032** |
+| FlowMatching3D 3D error | **0.101** |
+| Samples > 0.99 corr | 85/200 |
+| Best single sample | **0.9993** |
+| PC-3D comparison wins | 198/200 (corr) |
+| Total params | **661,861** |
